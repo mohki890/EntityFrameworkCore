@@ -119,6 +119,26 @@ namespace Microsoft.EntityFrameworkCore.Storage
         }
 
         /// <summary>
+        ///     Gets mapping for the given <see cref="RelationalTypeMappingInfo"/>.
+        ///     Returns null if no mapping is found.
+        /// </summary>
+        /// <param name="typeMappingInfo"> The input data to the mapping process. </param>
+        /// <returns> The type mapping to be used. </returns>
+        protected virtual RelationalTypeMapping FindMapping([NotNull] RelationalTypeMappingInfo typeMappingInfo)
+        {
+            Check.NotNull(typeMappingInfo, nameof(typeMappingInfo));
+
+            return (typeMappingInfo.StoreTypeName != null
+                       ? _explicitMappings.GetOrAdd(
+                           (typeMappingInfo.StoreTypeName, typeMappingInfo.ModelClrType?.UnwrapNullableType() ?? typeof(DBNull)),
+                           k => CreateMappingFromStoreType(typeMappingInfo))
+                       : null)
+                   ?? FindCustomMapping(typeMappingInfo)
+                   ?? (typeMappingInfo.Property == null ? null : FindCustomMapping(typeMappingInfo.Property))
+                   ?? (typeMappingInfo.ModelClrType == null ? null : FindMapping(typeMappingInfo.ModelClrType));
+        }
+
+        /// <summary>
         ///     Gets the relational database type for the given property.
         ///     Returns null if no mapping is found.
         /// </summary>
@@ -130,24 +150,7 @@ namespace Microsoft.EntityFrameworkCore.Storage
         {
             Check.NotNull(property, nameof(property));
 
-            var storeType = GetColumnType(property);
-
-            if (storeType == null)
-            {
-                var principalProperty = property.FindPrincipal();
-                if (principalProperty != null)
-                {
-                    storeType = GetColumnType(principalProperty);
-                }
-            }
-
-            return (storeType != null
-                       ? _explicitMappings.GetOrAdd(
-                           (storeType, property.ClrType.UnwrapNullableType()),
-                           k => CreateMappingFromStoreType(k.StoreType, k.ClrType))
-                       : null)
-                   ?? FindCustomMapping(property)
-                   ?? FindMapping(property.ClrType);
+            return FindMapping(new RelationalTypeMappingInfo(property: property));
         }
 
         /// <summary>
@@ -200,9 +203,9 @@ namespace Microsoft.EntityFrameworkCore.Storage
         /// </returns>
         public virtual RelationalTypeMapping FindMapping(string storeType)
         {
-            Check.NotNull(storeType, nameof(storeType));
+            Check.NotEmpty(storeType, nameof(storeType));
 
-            return _explicitMappings.GetOrAdd((storeType, typeof(DBNull)), k => CreateMappingFromStoreType(k.StoreType, null));
+            return FindMapping(new RelationalTypeMappingInfo(storeTypeName: storeType));
         }
 
         /// <summary>
@@ -211,17 +214,28 @@ namespace Microsoft.EntityFrameworkCore.Storage
         /// <param name="storeType">The type to create the mapping for.</param>
         /// <returns> The type mapping to be used. </returns>
         protected virtual RelationalTypeMapping CreateMappingFromStoreType([NotNull] string storeType)
-            => CreateMappingFromStoreType(storeType, null);
+        {
+            Check.NotEmpty(storeType, nameof(storeType));
+
+            return CreateMappingFromStoreType(new RelationalTypeMappingInfo(storeTypeName: storeType));
+        }
 
         /// <summary>
         ///     Creates the mapping for the given database type.
         /// </summary>
-        /// <param name="storeType"> The type to create the mapping for. </param>
-        /// <param name="clrType"> The CLR type for which the mapping will be used. </param>
+        /// <param name="typeMappingInfo"> The input data to the mapping process. </param>
         /// <returns> The type mapping to be used. </returns>
-        protected virtual RelationalTypeMapping CreateMappingFromStoreType([NotNull] string storeType, [CanBeNull] Type clrType)
+        protected virtual RelationalTypeMapping CreateMappingFromStoreType([NotNull] RelationalTypeMappingInfo typeMappingInfo)
         {
-            Check.NotNull(storeType, nameof(storeType));
+            Check.NotNull(typeMappingInfo, nameof(typeMappingInfo));
+
+            var storeType = typeMappingInfo.StoreTypeName;
+            if (storeType == null)
+            {
+                return null;
+            }
+            
+            var clrType = typeMappingInfo.ModelClrType?.UnwrapNullableType();
 
             if (TryFindExactMapping(storeType, clrType, out var mapping))
             {
@@ -331,12 +345,28 @@ namespace Microsoft.EntityFrameworkCore.Storage
         {
             Check.NotNull(property, nameof(property));
 
-            var clrType = property.ClrType.UnwrapNullableType();
+            return FindCustomMapping(new RelationalTypeMappingInfo(property: property));
+        }
+
+        /// <summary>
+        ///     Gets the relational database type for the given property, using a separate type mapper if needed.
+        ///     This base implementation uses custom mappers for string and byte array properties.
+        ///     Returns null if no mapping is found.
+        /// </summary>
+        /// <param name="typeMappingInfo"> The input data to the mapping process. </param>
+        /// <returns>
+        ///     The type mapping to be used.
+        /// </returns>
+        protected virtual RelationalTypeMapping FindCustomMapping([NotNull] RelationalTypeMappingInfo typeMappingInfo)
+        {
+            Check.NotNull(typeMappingInfo, nameof(typeMappingInfo));
+
+            var clrType = typeMappingInfo.ModelClrType?.UnwrapNullableType();
 
             return clrType == typeof(string)
-                ? GetStringMapping(property)
+                ? GetStringMapping(typeMappingInfo)
                 : clrType == typeof(byte[])
-                    ? GetByteArrayMapping(property)
+                    ? GetByteArrayMapping(typeMappingInfo)
                     : null;
         }
 
@@ -359,6 +389,36 @@ namespace Microsoft.EntityFrameworkCore.Storage
         {
             Check.NotNull(property, nameof(property));
 
+            return GetStringMapping(new RelationalTypeMappingInfo(property: property));
+        }
+
+        /// <summary>
+        ///     Gets the relational database type for the given byte array property.
+        /// </summary>
+        /// <param name="property"> The property to get the mapping for. </param>
+        /// <returns> The type mapping to be used. </returns>
+        protected virtual RelationalTypeMapping GetByteArrayMapping([NotNull] IProperty property)
+        {
+            Check.NotNull(property, nameof(property));
+
+            return GetByteArrayMapping(new RelationalTypeMappingInfo(property: property));
+        }
+
+        /// <summary>
+        ///     Gets the relational database type for the given string property.
+        /// </summary>
+        /// <param name="typeMappingInfo"> The input data to the mapping process. </param>
+        /// <returns> The type mapping to be used. </returns>
+        protected virtual RelationalTypeMapping GetStringMapping([NotNull] RelationalTypeMappingInfo typeMappingInfo)
+        {
+            Check.NotNull(typeMappingInfo, nameof(typeMappingInfo));
+
+            var property = typeMappingInfo.Property;
+            if (property == null)
+            {
+                return null;
+            }
+
             var principal = property.FindPrincipal();
 
             return StringMapper?.FindMapping(
@@ -370,11 +430,17 @@ namespace Microsoft.EntityFrameworkCore.Storage
         /// <summary>
         ///     Gets the relational database type for the given byte array property.
         /// </summary>
-        /// <param name="property"> The property to get the mapping for. </param>
+        /// <param name="typeMappingInfo"> The input data to the mapping process. </param>
         /// <returns> The type mapping to be used. </returns>
-        protected virtual RelationalTypeMapping GetByteArrayMapping([NotNull] IProperty property)
+        protected virtual RelationalTypeMapping GetByteArrayMapping([NotNull] RelationalTypeMappingInfo typeMappingInfo)
         {
-            Check.NotNull(property, nameof(property));
+            Check.NotNull(typeMappingInfo, nameof(typeMappingInfo));
+
+            var property = typeMappingInfo.Property;
+            if (property == null)
+            {
+                return null;
+            }
 
             return ByteArrayMapper?.FindMapping(
                 property.IsConcurrencyToken && property.ValueGenerated == ValueGenerated.OnAddOrUpdate,
